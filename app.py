@@ -8,6 +8,7 @@ import matplotlib.patches as mpatches
 from sklearn.feature_extraction.text import TfidfVectorizer
 from scipy.sparse import hstack, csr_matrix
 import os
+from googleapiclient.discovery import build
 
 # ── Sayfa ayarları ──────────────────────────────────────────────────────────
 st.set_page_config(
@@ -97,7 +98,6 @@ def nlp_temizle(metin: str) -> str:
     return ' '.join([k for k in metin.split() if k not in STOPWORDS and len(k) > 2])
 
 def meta_ozellik_cikar(metin: str) -> np.ndarray:
-    """9 meta özellik çıkar — eğitimle aynı sırada."""
     import unicodedata
     def emoji_say(m):
         return sum(1 for c in str(m) if unicodedata.category(c) in ('So','Sm','Sk') or ord(c) > 127700)
@@ -117,6 +117,31 @@ def meta_ozellik_cikar(metin: str) -> np.ndarray:
     ]])
 
 
+# ── YouTube Yardımcı Fonksiyonları ───────────────────────────────────────────
+def youtube_video_id_al(url):
+    regex = r'(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/)(?P<id>[a-zA-Z0-9_-]{11})'
+    match = re.match(regex, url)
+    if match:
+        return match.group('id')
+    return None
+
+def youtube_yorumlarini_cek(video_id, max_results=50):
+    try:
+        api_key = st.secrets["YOUTUBE_API_KEY"]
+        youtube = build('youtube', 'v3', developerKey=api_key)
+        request = youtube.commentThreads().list(
+            part="snippet",
+            videoId=video_id,
+            maxResults=max_results,
+            textFormat="plainText"
+        )
+        response = request.execute()
+        return [item['snippet']['topLevelComment']['snippet']['textDisplay'] for item in response['items']]
+    except Exception as e:
+        st.error(f"YouTube Canlı Bağlantı Hatası: {e}")
+        return []
+
+
 # ── Tahmin Fonksiyonu ────────────────────────────────────────────────────────
 def tahmin_yap(metin: str, modeller: dict) -> dict:
     if not metin.strip() or "tfidf" not in modeller:
@@ -127,18 +152,13 @@ def tahmin_yap(metin: str, modeller: dict) -> dict:
     meta    = meta_ozellik_cikar(temiz)
 
     tfidf_vec = modeller["tfidf"].transform([nlp])
-
-    # Kategorik özellikler (eğitimde 15 kategorik sütun vardı — sıfırla doldur)
     kat_bos = csr_matrix(np.zeros((1, 18)))
-
     X = hstack([tfidf_vec, csr_matrix(meta), kat_bos])
 
     sonuc = {}
 
-    # Sınav kaygısı tahmini
     if "kaygi" in modeller:
         model = modeller["kaygi"]
-        # Model boyut uyumsuzluğu varsa sadece tfidf kullan
         try:
             pred  = model.predict(X)[0]
             proba = model.predict_proba(X)[0]
@@ -149,7 +169,6 @@ def tahmin_yap(metin: str, modeller: dict) -> dict:
         sonuc["kaygi_var"] = bool(pred)
         sonuc["kaygi_olasilik"] = float(proba[1])
 
-    # Duygu tahmini (ayrı model varsa)
     if "duygu" in modeller:
         try:
             duygu_pred = modeller["duygu"].predict(X)[0]
@@ -163,7 +182,6 @@ def tahmin_yap(metin: str, modeller: dict) -> dict:
         sonuc["duygu"] = siniflar[en_yuksek_idx] if hasattr(siniflar[0], '__str__') else str(duygu_pred)
         sonuc["duygu_olasilik"] = float(duygu_prob[0][en_yuksek_idx])
     else:
-        # Duygu modeli yoksa kaygı olasılığından tahmin et
         if "kaygi_olasilik" in sonuc:
             p = sonuc["kaygi_olasilik"]
             if p > 0.6:
@@ -176,7 +194,6 @@ def tahmin_yap(metin: str, modeller: dict) -> dict:
                 sonuc["duygu"] = "Nötr"
                 sonuc["duygu_olasilik"] = 0.7
 
-    # Yorum tipi kural tabanlı
     soru_var  = '?' in metin
     tesekkur  = any(k in metin.lower() for k in ['teşekkür','sağ ol','eyvallah','helal'])
     elestirir = any(k in metin.lower() for k in ['kötü','berbat','beğenmedim','hayal kırıklığı'])
@@ -217,12 +234,11 @@ with st.sidebar:
 
     sayfa = st.radio(
         "Sayfa seç",
-        ["🔍 Tek Yorum Analizi", "📋 Toplu Analiz", "📈 İstatistikler", "ℹ️ Hakkında"],
+        ["🔍 Tek Yorum Analizi", "📋 Toplu Analiz", "🎥 Canlı YouTube Analizi", "📈 İstatistikler", "ℹ️ Hakkında"],
         label_visibility="collapsed"
     )
     st.divider()
 
-    # Model durumu
     modeller = modelleri_yukle()
     if modeller:
         st.success(f"✅ {len(modeller)} model yüklü")
@@ -230,10 +246,10 @@ with st.sidebar:
             st.caption(f"• Kaygı modeli: LR optimize")
         if "tfidf" in modeller:
             feats = modeller["tfidf"].max_features
-            st.caption(f"• TF-IDF: {feats:,} özellik")
+            st.caption(f"• TF-IDF: {feats:,} özellik" if feats else f"• TF-IDF: Yüklendi")
     else:
         st.warning("⚠️ Model dosyaları bulunamadı.\n`model/` klasörüne ekle.")
-    
+        
     st.divider()
     st.caption("**Model Performansı (Test)**")
     st.caption("ROC-AUC: **0.9895**")
@@ -260,7 +276,6 @@ if sayfa == "🔍 Tek Yorum Analizi":
             label_visibility="collapsed"
         )
 
-        # Örnek yorumlar
         st.caption("**Hızlı test için örnek yorumlar:**")
         ornekler = {
             "😟 Kaygılı": "Hocam ayt sınavına 2 ay kaldı, geometri konularından çok korkuyorum, ne yapmalıyım?",
@@ -291,7 +306,6 @@ if sayfa == "🔍 Tek Yorum Analizi":
                     sonuc = tahmin_yap(yorum_metni, modeller)
 
                 if sonuc:
-                    # Kaygı skoru
                     kaygi_rengi, kaygi_emojisi, kaygi_etiketi = kaygi_renk(sonuc.get("kaygi_olasilik", 0))
                     st.markdown(f"""
                     <div class="metric-card" style="border-top: 4px solid {kaygi_rengi}">
@@ -300,12 +314,9 @@ if sayfa == "🔍 Tek Yorum Analizi":
                     </div>
                     """, unsafe_allow_html=True)
 
-                    # Kaygı progress bar
                     st.progress(sonuc.get("kaygi_olasilik", 0), text=f"Kaygı Olasılığı: %{sonuc.get('kaygi_olasilik',0)*100:.1f}")
-
                     st.divider()
 
-                    # Duygu & Yorum tipi
                     c1, c2 = st.columns(2)
                     duygu = sonuc.get("duygu", "Nötr")
                     duygu_rengi, duygu_emojisi = DUYGU_RENK.get(duygu, ("#95a5a6", "😐"))
@@ -328,21 +339,15 @@ if sayfa == "🔍 Tek Yorum Analizi":
                         </div>
                         """, unsafe_allow_html=True)
 
-                    # Öğretmene öneri
                     st.divider()
                     if sonuc.get("kaygi_var"):
-                        st.info(f"""
-                        **📢 Öğretmen Önerisi:**  
-                        Bu öğrenci sınav kaygısı yaşıyor. Motivasyonu artıracak, süreci küçük adımlara bölen 
-                        bir yanıt vermeyi düşünebilirsiniz. Öğrencinin konu ve zaman planlaması konusunda 
-                        rehberlik faydalı olabilir.
-                        """)
+                        st.info("**📢 Öğretmen Önerisi:** Bu öğrenci sınav kaygısı yaşıyor. Motivasyonu artıracak yanıtlar ve rehberlik faydalı olabilir.")
                     elif duygu == "Olumsuz":
-                        st.warning("**📢 Öğretmen Önerisi:** Öğrenci bir konuda zorlanıyor. Konuyu farklı bir yaklaşımla anlatmayı deneyebilirsiniz.")
+                        st.warning("**📢 Öğretmen Önerisi:** Öğrenci zorlanıyor. Konuyu farklı bir yaklaşımla anlatmayı deneyebilirsiniz.")
                     elif duygu == "Olumlu":
-                        st.success("**📢 Öğretmen Önerisi:** Öğrenci memnun! Bu içerik formatını diğer konularda da kullanmayı düşünebilirsiniz.")
+                        st.success("**📢 Öğretmen Önerisi:** Öğrenci memnun! Bu formatı devam ettirebilirsiniz.")
                     else:
-                        st.info("**📢 Öğretmen Önerisi:** Nötr / genel bir yorum. Özel bir aksiyon gerekmeyebilir.")
+                        st.info("**📢 Öğretmen Önerisi:** Genel bir yorum. Özel bir aksiyon gerekmeyebilir.")
 
         elif analiz_btn:
             st.warning("Lütfen bir yorum girin.")
@@ -370,14 +375,12 @@ elif sayfa == "📋 Toplu Analiz":
         toplu_metin = st.text_area(
             "Her satıra bir yorum girin:",
             height=300,
-            placeholder="Hocam çok güzel anlattınız\nSınav çok yaklaştı, geometriden korkuyorum\nSes kalitesi biraz düşük\nBu kısmı anlamadım, tekrar anlatır mısınız?",
+            placeholder="Hocam çok güzel anlattınız\nSınav çok yaklaştı, geometriden korkuyorum",
             label_visibility="collapsed"
         )
 
-        # CSV yükle
         st.caption("**Veya CSV dosyası yükle:**")
         csv_dosya = st.file_uploader("CSV yükle (yorum sütunu olmalı)", type=["csv"], label_visibility="collapsed")
-
         toplu_btn = st.button("📊 Toplu Analiz Et", type="primary", use_container_width=True)
 
     with col2:
@@ -385,18 +388,13 @@ elif sayfa == "📋 Toplu Analiz":
 
         if toplu_btn:
             yorumlar = []
-
             if csv_dosya:
                 try:
                     df_yuklenen = pd.read_csv(csv_dosya)
-                    if 'yorum' in df_yuklenen.columns:
-                        yorumlar = df_yuklenen['yorum'].dropna().tolist()
-                    else:
-                        yorumlar = df_yuklenen.iloc[:, 0].dropna().tolist()
+                    yorumlar = df_yuklenen['yorum'].dropna().tolist() if 'yorum' in df_yuklenen.columns else df_yuklenen.iloc[:, 0].dropna().tolist()
                     st.success(f"CSV'den {len(yorumlar)} yorum yüklendi.")
                 except Exception as e:
                     st.error(f"CSV okunamadı: {e}")
-
             elif toplu_metin.strip():
                 yorumlar = [y.strip() for y in toplu_metin.strip().split('\n') if y.strip()]
 
@@ -415,15 +413,13 @@ elif sayfa == "📋 Toplu Analiz":
                             "Tip": s.get("yorum_tipi","?"),
                         })
                     progress.progress((i+1)/len(yorumlar), text=f"{i+1}/{len(yorumlar)} yorum analiz edildi")
-
                 progress.empty()
 
                 if sonuclar:
                     df_sonuc = pd.DataFrame(sonuclar)
                     st.dataframe(df_sonuc, use_container_width=True, height=280)
-
-                    # Özet istatistik
                     st.divider()
+                    
                     toplam = len(df_sonuc)
                     kaygi_sayisi = (df_sonuc["Kaygı"] == "VAR 🔴").sum()
                     olumlu_sayisi = (df_sonuc["Duygu"] == "Olumlu").sum()
@@ -435,27 +431,80 @@ elif sayfa == "📋 Toplu Analiz":
                     c3.metric("Olumlu", olumlu_sayisi, f"%{olumlu_sayisi/toplam*100:.0f}")
                     c4.metric("Olumsuz", olumsuz_sayisi, f"%{olumsuz_sayisi/toplam*100:.0f}")
 
-                    # İndir butonu
                     csv_indir = df_sonuc.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-                    st.download_button(
-                        "⬇️ Sonuçları CSV İndir",
-                        data=csv_indir,
-                        file_name="yorum_analiz_sonuclari.csv",
-                        mime="text/csv",
-                        use_container_width=True
-                    )
-            elif not modeller:
-                st.error("Model bulunamadı.")
+                    st.download_button("⬇️ Sonuçları CSV İndir", data=csv_indir, file_name="yorum_analiz_sonuclari.csv", mime="text/csv", use_container_width=True)
 
 
 # ════════════════════════════════════════════════════════════════════
-#  SAYFA 3: İSTATİSTİKLER
+#  SAYFA 3: CANLI YOUTUBE VİDEO ANALİZİ (YENİ EKLENEN MOTOR 🚀)
+# ════════════════════════════════════════════════════════════════════
+elif sayfa == "🎥 Canlı YouTube Analizi":
+    st.title("🎥 Canlı YouTube Matematik Videosu Analizi")
+    st.caption("Bir matematik video linki girin, öğrencilerin anlık kaygı haritasını çıkaralım.")
+    st.divider()
+
+    col1, col2 = st.columns([1, 1], gap="large")
+
+    with col1:
+        st.subheader("YouTube Veri Akışı Yapılandırması")
+        video_url = st.text_input("YouTube Video URL'si:", placeholder="https://www.youtube.com/watch?v=...")
+        yorum_sayisi = st.slider("Analiz Edilecek Maksimum Yorum Sayısı", min_value=10, max_value=100, value=50, step=10)
+        yt_btn = st.button("📊 Canlı Yorumları Çek ve Analiz Et", type="primary", use_container_width=True)
+
+    with col2:
+        st.subheader("Canlı Sınıf Analizi")
+
+        if yt_btn:
+            if not video_url:
+                st.warning("Lütfen geçerli bir YouTube video linki girin.")
+            else:
+                video_id = youtube_video_id_al(video_url)
+                if not video_id:
+                    st.error("Hatalı link! Video ID'si tespit edilemedi.")
+                else:
+                    with st.spinner("YouTube API üzerinden canlı yorumlar çekiliyor..."):
+                        canli_yorumlar = youtube_yorumlarini_cek(video_id, max_results=yorum_sayisi)
+                    
+                    if not canli_yorumlar:
+                        st.info("Bu videoya ait canlı yorum bulunamadı veya API bağlantısı kurulamadı.")
+                    else:
+                        st.success(f"🎉 Canlı Akış Başarılı! {len(canli_yorumlar)} adet öğrenci yorumu işleniyor.")
+                        
+                        yt_sonuclar = []
+                        for y in canli_yorumlar:
+                            s = tahmin_yap(y, modeller)
+                            if s:
+                                yt_sonuclar.append({
+                                    "Öğrenci Yorumu": y,
+                                    "Kaygı Seviyesi": f"%{s.get('kaygi_olasilik',0)*100:.1f}",
+                                    "Durum": "Kaygılı 🚨" if s.get("kaygi_var") else "Sakin 🌱",
+                                    "Baskın Duygu": s.get("duygu","Nötr")
+                                })
+                        
+                        df_yt = pd.DataFrame(yt_sonuclar)
+                        
+                        # Canlı Grafik Alanı
+                        kaygili_s = (df_yt["Durum"] == "Kaygılı 🚨").sum()
+                        sakin_s = len(df_yt) - kaygili_s
+                        
+                        fig_yt, ax_yt = plt.subplots(figsize=(4, 3))
+                        ax_yt.pie([kaygili_s, sakin_s], labels=['Kaygılı', 'Sakin'], colors=['#e74c3c', '#2ecc71'], autopct='%1.1f%%', startangle=90)
+                        ax_yt.axis('equal')
+                        st.pyplot(fig_yt, use_container_width=True)
+                        
+                        st.markdown(f"**🚨 Sınıfta Risk Altındaki Öğrenci Sayısı:** {kaygili_s} / {len(df_yt)}")
+                        st.divider()
+                        st.markdown("#### 📋 Canlı Yorum Listesi ve Tahminler")
+                        st.dataframe(df_yt, use_container_width=True, height=250)
+
+
+# ════════════════════════════════════════════════════════════════════
+#  SAYFA 4: İSTATİSTİKLER
 # ════════════════════════════════════════════════════════════════════
 elif sayfa == "📈 İstatistikler":
     st.title("📈 Proje İstatistikleri")
     st.divider()
 
-    # Model performans kartları
     st.subheader("Model Performansı (Test Seti)")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Accuracy", "%98.30")
@@ -466,26 +515,21 @@ elif sayfa == "📈 İstatistikler":
 
     st.divider()
     st.subheader("Veri Seti Özeti")
-
     col1, col2 = st.columns(2)
 
     with col1:
-        # Duygu dağılımı
         fig, ax = plt.subplots(figsize=(5, 3.5))
         duygu_data = {"Nötr": 5366, "Olumsuz": 287, "Olumlu": 236, "Karmaşık": 2}
         renkler = ["#95a5a6", "#e74c3c", "#2ecc71", "#f39c12"]
         bars = ax.bar(duygu_data.keys(), duygu_data.values(), color=renkler, edgecolor='white')
         for bar, val in zip(bars, duygu_data.values()):
-            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 30,
-                    f'{val:,}', ha='center', fontsize=9)
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 30, f'{val:,}', ha='center', fontsize=9)
         ax.set_title('Duygu Dağılımı', fontweight='bold')
-        ax.set_ylabel('Yorum Sayısı')
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         st.pyplot(fig, use_container_width=True)
 
     with col2:
-        # Model karşılaştırma
         fig2, ax2 = plt.subplots(figsize=(5, 3.5))
         modeller_adi = ['LR\nbaseline', 'LR\nbalanced', 'Random\nForest', 'XGB\n(BERT)', 'LR\noptimize★']
         roc_skorlar  = [0.9851, 0.9907, 0.9826, 0.9684, 0.9895]
@@ -493,8 +537,7 @@ elif sayfa == "📈 İstatistikler":
         b2 = ax2.bar(modeller_adi, roc_skorlar, color=renkler2, edgecolor='white')
         ax2.set_ylim(0.90, 1.01)
         for bar, val in zip(b2, roc_skorlar):
-            ax2.text(bar.get_x() + bar.get_width()/2, val + 0.001,
-                     f'{val:.4f}', ha='center', fontsize=8)
+            ax2.text(bar.get_x() + bar.get_width()/2, val + 0.001, f'{val:.4f}', ha='center', fontsize=8)
         ax2.set_title('ROC-AUC Karşılaştırması', fontweight='bold')
         ax2.spines['top'].set_visible(False)
         ax2.spines['right'].set_visible(False)
@@ -502,72 +545,38 @@ elif sayfa == "📈 İstatistikler":
 
     st.divider()
     st.subheader("SHAP — En Önemli Kaygı Kelimeleri")
-    shap_data = {
-        "ayt": 0.85, "tyt": 0.78, "lgs": 0.62, "kpss": 0.55,
-        "yks": 0.35, "sınav": 0.30, "neden": 0.22, "kaygı": 0.20
-    }
+    shap_data = {"ayt": 0.85, "tyt": 0.78, "lgs": 0.62, "kpss": 0.55, "yks": 0.35, "sınav": 0.30, "neden": 0.22, "kaygı": 0.20}
     fig3, ax3 = plt.subplots(figsize=(9, 3))
-    kelimeler = list(shap_data.keys())
-    degerler = list(shap_data.values())
-    ax3.barh(kelimeler[::-1], degerler[::-1], color='#e74c3c', edgecolor='white')
+    ax3.barh(list(shap_data.keys())[::-1], list(shap_data.values())[::-1], color='#e74c3c', edgecolor='white')
     ax3.set_title('Sınav Kaygısını En Güçlü Tetikleyen Kelimeler', fontweight='bold')
-    ax3.set_xlabel('|SHAP Değeri|')
     ax3.spines['top'].set_visible(False)
     ax3.spines['right'].set_visible(False)
     st.pyplot(fig3, use_container_width=True)
 
 
 # ════════════════════════════════════════════════════════════════════
-#  SAYFA 4: HAKKINDA
+#  SAYFA 5: HAKKINDA
 # ════════════════════════════════════════════════════════════════════
 elif sayfa == "ℹ️ Hakkında":
     st.title("ℹ️ Proje Hakkında")
     st.divider()
-
     st.markdown("""
     ## 🎓 YouTube Matematik Yorumları NLP Projesi
-
-    Bu sistem, online matematik eğitim videolarına gelen öğrenci yorumlarını 
-    yapay zeka ile analiz ederek öğretmenlere **gerçek zamanlı geri bildirim** sağlar.
-
+    Bu sistem, online matematik eğitim videolarına gelen öğrenci yorumlarını yapay zeka ile analiz ederek öğretmenlere **gerçek zamanlı geri bildirim** sağlar.
+    
     ---
-
     ### 📊 Proje Özeti
-
     | Özellik | Detay |
     |---------|-------|
     | Veri seti | 5.891 YouTube matematik yorumu |
     | Hedef | Sınav kaygısı tespiti |
     | Model | Lojistik Regresyon (GridSearch optimize) |
-    | Özellikler | TF-IDF (7.353) + BERT (768) + Meta (9) |
     | Test ROC-AUC | **0.9895** |
     | Test Accuracy | **%98.30** |
-    | FP (Yanlış Alarm) | **0** |
-
     ---
-
     ### 🔬 Kullanılan Teknolojiler
-
-    - **NLP:** TF-IDF, BERTurk (emrecan/bert-base-turkish-cased)
+    - **NLP:** TF-IDF, BERTurk
     - **ML:** Scikit-learn, XGBoost
     - **Açıklanabilirlik:** SHAP
     - **Arayüz:** Streamlit
-    - **Platform:** Kaggle (GPU T4)
-
-    ---
-
-    ### 🏆 Bulgular
-
-    **SHAP analizi** sonucuna göre en güçlü sınav kaygısı sinyalleri:
-    `ayt`, `tyt`, `lgs`, `kpss` → Sınav odaklı kelimeler kaygıyı en çok tetikliyor.
-
-    **Hata analizi** gösteriyor ki model:
-    - Açık kaygı ifadelerini ✅ çok iyi yakalıyor
-    - Örtük/dolaylı kaygıları ⚠️ bazen kaçırabiliyor
-
-    ---
-
-    ### 👩‍💻 Geliştirici
-    Proje, 6 aşamalı makine öğrenmesi pipeline'ı kapsamaktadır:  
-    EDA → Temizleme → Özellik Mühendisliği → Model Eğitimi → Değerlendirme → Görselleştirme
     """)
