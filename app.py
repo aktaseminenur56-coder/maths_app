@@ -127,7 +127,7 @@ def youtube_video_id_al(url):
 
 def youtube_yorumlarini_cek(video_id, max_results=50):
     try:
-        api_key = st.secrets["YOUTUBE_API_KEY"]
+        api_key = st.secrets["AIzaSyDbY549CLPF0kvFJan69J0BewwfuZZPwic"]
         youtube = build('youtube', 'v3', developerKey=api_key)
         request = youtube.commentThreads().list(
             part="snippet",
