@@ -436,7 +436,7 @@ elif sayfa == "📋 Toplu Analiz":
 
 
 # ════════════════════════════════════════════════════════════════════
-#  SAYFA 3: CANLI YOUTUBE VİDEO ANALİZİ (YENİ EKLENEN MOTOR 🚀)
+#  SAYFA 3: CANLI YOUTUBE VİDEO ANALİZİ 
 # ════════════════════════════════════════════════════════════════════
 elif sayfa == "🎥 Canlı YouTube Analizi":
     st.title("🎥 Canlı YouTube Matematik Videosu Analizi")
